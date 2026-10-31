@@ -5,6 +5,7 @@
 - EP (expert parallel): для MoE; у dense-моделей нет.
 - Арифметика How to Scale: как считать FLOPs/B байтовые требования; правило: обучение ~6×параметров FLOP/токен, инференс 2×параметров на токен forward. Таблица приёмов.
 - Спекулятивный декодинг: маленькая draft-модель предлагает k токенов, большая проверяет одним forward; accept rate α, ускорение до (1-α^(k+1))/(1-α). Числа: при α=0.7, k=4 → ~2.2x. Варианты: n-gram/prompt lookup (без draft-модели), EAGLE/Medusa (дополнительные головы), MTP у Qwen3.
+- UBTree (2609.39972): diversity-first parallel tree drafting — unigram proposer + bigram selector (tree-native KL), verification tree; внешний tree drafter, НЕ self-speculation. Авторские замеры: 5.84–6.94x Qwen3-4B/8B (28/28 vs DARTree), 5.36x Ling3-Flash (SGLang TP4); model card B16: 3.428x E2E avg (tree 32). Serving: ветка asahi/ubtree, PR sglang#44050 open (upstream не подтверждён). Подробно: papers/ubtree.md, papers/ubtree-runtime.md.
 - Self-speculative: ранняя выкладка слоёв как draft.
 - Контекст: длинные последовательности, ring attention в двух абзацах.
 - Задание 10.1: симуляция TP-шарда: разрез attention-весов Qwen3-0.6B на 2 части по головам, собрать и сверить с полным forward (numpy; на одной машине — эмуляция).

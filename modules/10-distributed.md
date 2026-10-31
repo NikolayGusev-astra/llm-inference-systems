@@ -140,11 +140,35 @@ Ring attention относится к *context parallelism*: последоват
 
 **Self-speculative / early exit.** Draft — та же модель, вышедшая после половины слоёв, верификация — полный проход. Нет второй модели и лишней памяти, но draft стоит ~50% шага, поэтому чистый выигрыш ниже и держится на том, насколько рано формируется правильный токен.
 
+### UBTree: diversity-first parallel tree drafting
+
+Параллельные блочные драфтеры (DFlash, [arXiv:2602.06036](https://arxiv.org/abs/2602.06036)) предлагают весь блок кандидатов за один forward — но коммитятся в **один путь**. Если распределение target-модели высокоэнтропийное, выбранный путь рано расходится, и хвост блока выбрасывается. UBTree ([arXiv:2609.39972](https://arxiv.org/abs/2609.39972), Inclusion AI) лечит это, сохраняя параллельность: unigram proposer предлагает top-`k` кандидатов независимо для каждой позиции, лёгкий bigram selector за один проход оценивает пары соседних кандидатов, а дешёвый поиск превращает эти оценки в verification tree. Это **внешний tree drafter**: отдельный обученный draft checkpoint работает рядом с target-моделью, target по-прежнему верифицирует дерево, поэтому lossless-контракт из [спекулятивного сэмплинга (arXiv:2302.01318)](https://arxiv.org/abs/2302.01318) и раздела 10.2 не меняется — ускорение не означает изменение распределения target.
+
+Ключевая деталь — обучение селектора. В отличие от proposer'а с обычным cross-entropy, selector обучается на **high-temperature трассах с renormalized KL**: супервизия выходит за пределы greedy-пути и ранжирует правдоподобные альтернативные ветви, увеличивая шанс принять дополнительные токены при верификации дерева. Это tree-native training, а не «ещё один top-k». Ближайший сосед — DARTree ([arXiv:2608.13524](https://arxiv.org/abs/2608.13524)): он тоже строит дерево, но расширяет предобученную autoregressive correction head от цепочек к деревьям **training-free**; UBTree, наоборот, обучает proposer/selector и делает tree-native обучение. Ещё один сосед — DSpark (фронтовой baseline на production-оценке UBTree; сам DSpark описывается в материалах DFlash-линии).
+
+**Цена.** Дополнительный чекпоинт драфта (у опубликованного Ling3-Flash-UBTree-B16 — 481,983,774 параметра в BF16, пять full-attention слоёв DFlash-бэкбона, чекпоинт не является самостоятельной моделью и работает рядом с matching target [inclusionAI/Ling-3.0-flash](https://huggingface.co/inclusionAI/Ling-3.0-flash)), память под selector и tree verification, привязка к конкретной target/draft-паре и рантайму, а в SGLang — специфичные настройки ядер.
+
+**Serving status.** Рабочий путь опубликован в ветке `asahi/ubtree` ([репозиторий AsaHIXx/sglang](https://github.com/AsaHIXx/sglang/tree/asahi/ubtree)); native upstream-интеграция — открытый [PR sgl-project/sglang#44050](https://github.com/sgl-project/sglang/pull/44050) (состояние на 30.10.2026: open, WIP, +7730/−189 в 43 файлах; добавляет factorized KDA tree verification, fused causal convolution + tree transform, accepted-path state commit, fixed-width CUDA Graph decode и FA3 tree-verification metadata). Пока PR открыт, курс не утверждает upstream support.
+
+**Результаты.** Все цифры ниже — заявки авторов/страницы проекта, независимых реплик в первоисточниках нет; конфигурации несопоставимы между источниками (см. модуль 16):
+
+| Источник | target | draft | Hardware / TP | Benchmark | Декодинг | Budget | Baseline | Метрика | Авторский замер |
+|---|---|---|---|---:|---|---|---|---|
+| arXiv abs/2609.39972 | Qwen3-4B, Qwen3-8B | UBTree (unigram+bigram) | не раскрыт | 7 стандартных бенчмарков | greedy | н/д | AR | средний speedup **5.84–6.94×** | да |
+| arXiv abs/2609.39972 | Qwen3-4B, Qwen3-8B | UBTree | не раскрыт | 7 бенчмарков × конфигурации | greedy + temps | н/д | DARTree | 28/28 wins | да |
+| Официальный сайт | Qwen3-8B | UBTree | не раскрыт | 7 бенчмарков | greedy | н/д | AR | **6.94×** avg speedup | да |
+| Официальный сайт | Ling3-Flash 124B | Ling3-Flash-UBTree | SGLang, TP4 | production-scale | н/д | н/д | DSpark | **5.36×** против 4.50× у DSpark | да |
+| Официальный сайт | Ling3-Flash 124B | Ling3-Flash-UBTree | SGLang, TP4 | LongBench-v2, промпты до 260K | н/д | н/д | DSpark | **+37.6%** acceptance length | да |
+| Model card B16 | Ling3-Flash | Ling3-Flash-UBTree-B16 | TP4, concurrency 1, BF16 | 6 датасетов (GSM8K…LiveCodeBench) | greedy | tree 32 | AR | avg **9.16** acceptance / **3.428×** E2E / **1009.6** tok/s | да |
+
+Модельная карта честно разделяет метрики: acceptance length — число возвращённых токенов, делённое на количество verify-вызовов target (с anchor); TPS — возвращённые токены, делённые на полное клиентское HTTP-время (с prefill); E2E speedup — отношение TPS к AR-TPS. Acceptance и TPS — независимые медианы по трём прогонам; AR — один прогон на бенчмарк. Обратите внимание: headline «6.94×» (сайт, Qwen3-8B) и «3.428× E2E» (model card, Ling3-Flash) — **разные модели, бюджеты дерева и наборы бенчмарков**, их нельзя смешивать в одну цифру.
+
 **Когда что выбирать:**
 - код, суммаризация, редактирование, копируемые ответы → prompt lookup (бесплатно);
 - общий чат/инструкции и есть ресурсы на обучение → EAGLE-2/3 или Medusa;
 - Qwen3 и хочется «из коробки» → MTP;
-- жёсткие ограничения по памяти и нет второй модели → early exit.
+- жёсткие ограничения по памяти и нет второй модели → early exit;
+- есть обученный draft checkpoint под вашу target и нужна устойчивость к высокоэнтропийным ветвям → UBTree (раздел выше; на момент обновления — только ветка `asahi/ubtree`, upstream PR открыт).
 
 ## Задание 10.1: симуляция TP-шарда
 
@@ -488,6 +512,7 @@ baseline    :    0.10 ms (2,520,000 ток/с, 252 forward)
 - **Обучение 6N FLOPs/токен, инференс 2N.** Прямой проход ≈ 2N, обратный ≈ 4N, итого 6N на токен при обучении; на инференсе считается только 2N на токен (плюс чтение KV-cache), из чего напрямую следует roofline-арифметика декода и вывод, что декод упирается в память, а префилл — в compute.
 - **Спекуляция: (1−α^(k+1))/(1−α) ≈ 2.77 принятых токена за шаг при α=0.7, k=4 → ~2.21× ускорения** с учётом затрат на draft-модель; выигрыш растёт с α и быстро насыщается по k — наращивать k дальше 4–5 при α≈0.7 смысла нет.
 - **n-gram lookup работает без draft-модели.** Вместо отдельной сети — поиск по промпту или корпусу (prompt lookup, suffix automaton): нулевые затраты на обучение и на память под веса, отлично на копирующих задачах (суммаризация, RAG, правки кода), слабо — на свободной генерации.
+- **UBTree — внешний tree drafter с обученным селектором** ([arXiv:2609.39972](https://arxiv.org/abs/2609.39972)): unigram proposer + bigram selector с tree-native обучением на high-temperature трассах (renormalized KL). Авторские замеры: 5.84–6.94× avg на Qwen3-4B/8B (28/28 против DARTree), 5.36× на Ling3-Flash 124B в SGLang TP4; данные model card (Ling3-Flash-B16, tree 32): 3.428× E2E avg. Всё — заявки авторов; независимых реплик в первоисточниках нет. Serving: ветка `asahi/ubtree`, upstream PR [#44050](https://github.com/sgl-project/sglang/pull/44050) открыт.
 
 ---
 

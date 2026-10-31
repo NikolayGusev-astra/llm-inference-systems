@@ -6,6 +6,7 @@
 - Self-speculative со sparse attention (2602.07223): draft на подмножестве кеша, verify на полном — lossless
 - Component-aware self-speculation для гибридных моделей (2605.01106)
 - Экономика: acceptance rate против стоимости draft-прохода; когда спекуляция вредна (наш опыт: DFlash 0.25x на 4060 под нагрузкой)
+- Внешние драфтеры рядом (cross-link, НЕ self-speculation): UBTree 2609.39972 (unigram+bigram selector, tree-native), DARTree 2608.13524 (training-free AR-head trees) — отдельный draft checkpoint, не срез target; разбор в модуле 10, материалы papers/ubtree.md, papers/dartree.md
 - Задание 15.1: слой-скип спекуляция на toy-модели: draft = forward без K последних слоёв, verify полным проходом; замер acceptance и wall-clock против модуля 10
 - Задание 15.2: адаптивная длина драфта по скользящему acceptance — простейший контроллер
 
